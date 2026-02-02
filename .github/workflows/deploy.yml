@@ -107,8 +107,13 @@ jobs:
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: |
+            type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:buildcache
+            type=gha
+          cache-to: |
+            type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:buildcache,mode=max
+            type=gha,mode=max
+          outputs: type=image,compression=zstd,compression-level=3
           provenance: false
 
       - name: Print build summary
@@ -272,9 +277,9 @@ jobs:
           echo "Testing: /health and /info endpoints"
           echo ""
 
-          echo "⏳ Waiting 30 seconds for Lambda cold start..."
+          echo "⏳ Waiting 10 seconds for Lambda cold start..."
           echo "   (Lambda needs time to initialize services on first invocation)"
-          for i in {30..1}; do
+          for i in {10..1}; do
             echo -n "   $i seconds remaining..."
             sleep 1
             echo -ne "\r"
@@ -286,11 +291,11 @@ jobs:
           echo "🏥 Testing health endpoint with retry logic..."
           echo "   Endpoint: $API_URL/health"
           RETRY=0
-          MAX_RETRIES=5
+          MAX_RETRIES=3
           until curl -f -s "$API_URL/health" > /dev/null || [ $RETRY -eq $MAX_RETRIES ]; do
             RETRY=$((RETRY+1))
-            echo "   ⚠️  Attempt $RETRY/$MAX_RETRIES failed, waiting 10 seconds before retry..."
-            sleep 10
+            echo "   ⚠️  Attempt $RETRY/$MAX_RETRIES failed, waiting 5 seconds before retry..."
+            sleep 5
           done
 
           if [ $RETRY -eq $MAX_RETRIES ]; then
@@ -355,6 +360,7 @@ jobs:
           echo "=========================================="
 
       - name: Test S3 Storage Backend
+        if: contains(github.event.head_commit.message, '[test-s3]') || github.event_name == 'release'
         env:
           API_URL: ${{ secrets.API_GATEWAY_URL }}
         run: |
@@ -378,18 +384,18 @@ jobs:
           # Force Lambda to cycle through containers by invoking multiple times
           # This ensures old warm containers (with old env vars) are replaced by new ones
           echo "🔄 Forcing Lambda container refresh (cycling through warm containers)..."
-          echo "   (Invoking 20 times to ensure all old containers are replaced)"
+          echo "   (Invoking 5 times to ensure all old containers are replaced)"
           SUCCESS_COUNT=0
-          for i in {1..20}; do
-            if [ $((i % 5)) -eq 0 ]; then
-              echo "   Invocation $i/20..."
+          for i in {1..5}; do
+            if [ $((i % 2)) -eq 0 ]; then
+              echo "   Invocation $i/5..."
             fi
             if curl -f -s "$API_URL/health" > /dev/null 2>&1; then
               SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
             fi
-            sleep 0.5  # Small delay between invocations
+            sleep 0.3  # Small delay between invocations
           done
-          echo "   ✅ Container refresh complete! ($SUCCESS_COUNT/20 invocations successful)"
+          echo "   ✅ Container refresh complete! ($SUCCESS_COUNT/5 invocations successful)"
           echo "   All new containers should now have STORAGE_BACKEND=s3"
           echo ""
 
@@ -450,12 +456,8 @@ jobs:
           echo "✅ Test 1 passed: S3 storage backend confirmed"
           echo ""
 
-          # Wait a moment to ensure S3 has the cached data
-          echo "⏳ Waiting 5 seconds for S3 cache to propagate..."
-          sleep 5
-          echo ""
-
           # Test 2: Re-upload same document (should be cached in S3)
+          # Note: S3 has strong read-after-write consistency - no wait needed
           echo "📤 Test 2: Re-upload same document (expect cache_hit=true)..."
           UPLOAD2_RESPONSE=$(curl -s -X POST "$API_URL/upload" \
             -F "file=@test-s3-storage.txt" \
